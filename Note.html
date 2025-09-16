@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="ne">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Auto-save Note Files</title>
+  <style>
+    :root{
+      --bg:#0f172a; --card:#0b1220; --muted:#94a3b8; --accent:#7c3aed;
+      --panel:#071026; --glass: rgba(255,255,255,0.03);
+    }
+    *{box-sizing:border-box;font-family:Inter, system-ui, sans-serif}
+    body{margin:0;height:100vh;background:linear-gradient(180deg,#071025 0%, #07183a 100%);color:#e6eef8;display:flex;align-items:stretch}
+    .app{display:flex;width:100%;height:100vh}
+    .sidebar{
+      width:300px;background:var(--card);padding:18px;border-right:1px solid rgba(255,255,255,0.03);
+      display:flex;flex-direction:column;gap:12px;
+    }
+    .brand{font-weight:700;font-size:18px;color:var(--accent)}
+    .controls{display:flex;gap:8px;align-items:center}
+    .controls input{flex:1;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);background:var(--glass);color:inherit}
+    button{background:var(--accent);border:none;color:white;padding:8px 10px;border-radius:8px;cursor:pointer}
+    .file-list{overflow:auto;flex:1;padding-top:6px;display:flex;flex-direction:column;gap:8px}
+    .file{
+      padding:10px;border-radius:8px;cursor:pointer;background:transparent;border:1px solid rgba(255,255,255,0.02);
+      display:flex;justify-content:space-between;align-items:center;
+    }
+    .file.active{background:linear-gradient(90deg, rgba(124,58,237,0.14), rgba(124,58,237,0.06));box-shadow:0 6px 18px rgba(124,58,237,0.06)}
+    .file .meta{display:flex;flex-direction:column}
+    .file .title{font-weight:600}
+    .file .time{font-size:12px;color:var(--muted)}
+    .main{
+      flex:1;display:flex;flex-direction:column;padding:18px;gap:12px;
+    }
+    .editor-top{display:flex;gap:8px;align-items:center}
+    .title-input{flex:1;padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);background:var(--panel);color:inherit;font-size:16px}
+    .status{font-size:13px;color:var(--muted);min-width:120px;text-align:right}
+    .editor{flex:1;background:linear-gradient(180deg, rgba(255,255,255,0.02), transparent);border-radius:10px;padding:12px;border:1px solid rgba(255,255,255,0.02);display:flex;flex-direction:column;gap:8px}
+    textarea{flex:1;width:100%;background:transparent;border:none;resize:none;color:inherit;font-size:15px;outline:none}
+    .hint{font-size:13px;color:var(--muted)}
+    .empty{flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted)}
+    .remove{background:transparent;border:1px solid rgba(255,255,255,0.06);padding:6px;border-radius:8px;color:var(--muted);cursor:pointer}
+    @media(max-width:720px){
+      .sidebar{width:100%;height:240px;border-right:none;border-bottom:1px solid rgba(255,255,255,0.03);position:relative}
+      .app{flex-direction:column}
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">My Notes (Auto-save)</div>
+      <div class="controls">
+        <input id="newTitleInput" placeholder="नयाँ फाइलको टाइटल लेख्नुहोस्..." />
+        <button id="newBtn">New</button>
+      </div>
+      <div class="hint">Click a file to open it. Changes auto-save.</div>
+      <div class="file-list" id="fileList"></div>
+      <div style="font-size:12px;color:var(--muted);margin-top:8px">Local auto-save — only on this browser.</div>
+    </aside>
+
+    <main class="main">
+      <div class="editor-top">
+        <input id="title" class="title-input" placeholder="File title..." />
+        <div class="status" id="status">No file selected</div>
+        <button id="deleteBtn" class="remove" title="Delete current file">Delete</button>
+      </div>
+
+      <div class="editor" id="editorWrap">
+        <textarea id="editor" placeholder="Click or create a file to start writing..." rows="20"></textarea>
+      </div>
+    </main>
+  </div>
+
+<script>
+/*
+  Simple file system using localStorage.
+  Key: 'autosave_files' -> JSON object: { id1: {title, content, updatedAt}, ... }
+*/
+const STORAGE_KEY = 'autosave_files_v1';
+const fileListEl = document.getElementById('fileList');
+const newBtn = document.getElementById('newBtn');
+const newTitleInput = document.getElementById('newTitleInput');
+const titleInput = document.getElementById('title');
+const editor = document.getElementById('editor');
+const statusEl = document.getElementById('status');
+const deleteBtn = document.getElementById('deleteBtn');
+
+let files = {}; // id -> file
+let currentId = null;
+let saveTimer = null;
+let typingTimer = null;
+let isSaving = false;
+
+function loadFilesFromStorage(){
+  try{
+    const raw = localStorage.getItem(STORAGE_KEY);
+    files = raw ? JSON.parse(raw) : {};
+  }catch(e){
+    console.error('load error', e);
+    files = {};
+  }
+}
+
+function persistFilesToStorage(){
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(files));
+}
+
+function formatTime(ts){
+  const d = new Date(ts);
+  return d.toLocaleString();
+}
+
+function renderFileList(){
+  fileListEl.innerHTML = '';
+  // sort by updatedAt desc
+  const items = Object.entries(files).sort((a,b)=> (b[1].updatedAt||0) - (a[1].updatedAt||0));
+  if(items.length === 0){
+    const e = document.createElement('div');
+    e.className='hint';
+    e.textContent = 'No files yet. Create new file above.';
+    fileListEl.appendChild(e);
+    return;
+  }
+  for(const [id, f] of items){
+    const el = document.createElement('div');
+    el.className = 'file' + (id===currentId ? ' active':'');
+
+    const meta = document.createElement('div');
+    meta.className='meta';
+    const t = document.createElement('div'); t.className='title'; t.textContent = f.title || 'Untitled';
+    const tm = document.createElement('div'); tm.className='time'; tm.textContent = f.updatedAt ? formatTime(f.updatedAt) : '';
+    meta.appendChild(t); meta.appendChild(tm);
+
+    const right = document.createElement('div');
+    right.style.fontSize='13px';
+    right.style.color='var(--muted)';
+    right.textContent = (f.content||'').slice(0,20).replace(/\n/g,' ') + ( (f.content && f.content.length>20) ? '…':'');
+
+    el.appendChild(meta);
+    el.appendChild(right);
+
+    el.addEventListener('click', ()=> openFile(id));
+    fileListEl.appendChild(el);
+  }
+}
+
+function newFile(title){
+  const id = 'f_' + Date.now() + '_' + Math.random().toString(36).slice(2,6);
+  files[id] = { title: title||('Untitled ' + (Object.keys(files).length+1)), content: '', updatedAt: Date.now() };
+  persistFilesToStorage();
+  currentId = id;
+  renderFileList(); renderEditor();
+}
+
+function openFile(id){
+  if(!files[id]) return;
+  currentId = id;
+  renderFileList();
+  renderEditor();
+  statusEl.textContent = 'Loaded';
+}
+
+function renderEditor(){
+  if(!currentId || !files[currentId]){
+    titleInput.value = '';
+    editor.value = '';
+    statusEl.textContent = 'No file selected';
+    deleteBtn.style.display = 'none';
+    return;
+  }
+  const f = files[currentId];
+  titleInput.value = f.title || '';
+  editor.value = f.content || '';
+  statusEl.textContent = 'Saved • ' + formatTime(f.updatedAt || Date.now());
+  deleteBtn.style.display = '';
+}
+
+function scheduleSave(){
+  if(!currentId) return;
+  statusEl.textContent = 'Saving...';
+  if(saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(()=> {
+    isSaving = true;
+    const f = files[currentId];
+    f.title = titleInput.value || 'Untitled';
+    f.content = editor.value;
+    f.updatedAt = Date.now();
+    persistFilesToStorage();
+    isSaving = false;
+    statusEl.textContent = 'Saved • ' + formatTime(f.updatedAt);
+    renderFileList();
+  }, 600); // debounce 600ms
+}
+
+// auto periodic backup every 15s (in case)
+setInterval(()=> {
+  if(currentId && !isSaving){
+    const f = files[currentId];
+    if(!f) return;
+    // if editor differs from storage, persist
+    if(f.content !== editor.value || f.title !== titleInput.value){
+      f.title = titleInput.value || 'Untitled';
+      f.content = editor.value;
+      f.updatedAt = Date.now();
+      persistFilesToStorage();
+      statusEl.textContent = 'Auto-saved • ' + formatTime(f.updatedAt);
+      renderFileList();
+    }
+  }
+}, 15000);
+
+editor.addEventListener('input', ()=> {
+  statusEl.textContent = 'Typing...';
+  scheduleSave();
+});
+titleInput.addEventListener('input', scheduleSave);
+
+newBtn.addEventListener('click', ()=>{
+  const t = newTitleInput.value.trim();
+  newFile(t || undefined);
+  newTitleInput.value = '';
+});
+
+newTitleInput.addEventListener('keydown', (e)=>{
+  if(e.key === 'Enter'){ newBtn.click(); }
+});
+
+deleteBtn.addEventListener('click', ()=>{
+  if(!currentId) return;
+  if(!confirm('Delete this file?')) return;
+  delete files[currentId];
+  persistFilesToStorage();
+  // pick another id or none
+  const keys = Object.keys(files);
+  currentId = keys.length ? keys[0] : null;
+  renderFileList(); renderEditor();
+});
+
+window.addEventListener('storage', (e)=>{
+  // when localStorage changes in another tab, reload files
+  if(e.key === STORAGE_KEY){
+    loadFilesFromStorage();
+    renderFileList();
+    if(currentId) renderEditor();
+  }
+});
+
+// init
+loadFilesFromStorage();
+renderFileList();
+renderEditor();
+</script>
+</body>
+</html>
